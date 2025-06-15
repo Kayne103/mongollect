@@ -8,10 +8,13 @@ from functools import wraps
 class MockCollectionInjector(CollectionInjector):
     """A mock version of CollectionInjector that doesn't rely on the db attribute being set on the wrapped class"""
 
-    def collection(self, name):
+    def collection(self, name, with_crud=True):
         """Override the collection method to avoid the db attribute issue"""
         if not name or not isinstance(name, str):
             raise ValueError("Collection name must be a non-empty string")
+
+        if not isinstance(with_crud, bool):
+            raise TypeError("with_crud must be a boolean")
 
         def wrapper(cls):
             """Decorator function that wraps the target class"""
@@ -24,15 +27,33 @@ class MockCollectionInjector(CollectionInjector):
             except (KeyError, AttributeError) as e:
                 raise KeyError(f"Collection '{name}' not accessible in database") from e
 
-            # Create a new class that inherits from the original class
-            class Wrapped(cls):
+            # Import CRUDMixin here to avoid circular import
+            from mongollect.core import CRUDMixin
+
+            # Create base classes tuple
+            base_classes = [cls]
+            if with_crud:
+                base_classes.append(CRUDMixin)
+
+            # Create a new class that inherits from the original class and optionally CRUDMixin
+            class Wrapped(*base_classes):
                 def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
+                    # Initialize all parent classes
+                    for base in base_classes:
+                        if hasattr(base, '__init__'):
+                            try:
+                                base.__init__(self, *args, **kwargs)
+                            except TypeError:
+                                # Handle classes that don't accept arguments
+                                if base is not object:
+                                    base.__init__(self)
+
                     # Use the collection from the outer scope
                     self.collection = collection
 
                 def __repr__(self):
-                    return f"{cls.__name__}(collection='{name}')"
+                    crud_info = " with CRUD" if with_crud else ""
+                    return f"{cls.__name__}(collection='{name}'{crud_info})"
 
             # Preserve original class metadata
             Wrapped.__name__ = cls.__name__
@@ -43,10 +64,13 @@ class MockCollectionInjector(CollectionInjector):
             return Wrapped
         return wrapper
 
-    def multiple_collections(self, **collections):
+    def multiple_collections(self, enable_crud=False, **collections):
         """Override the multiple_collections method to avoid the db attribute issue"""
         if not collections:
             raise ValueError("At least one collection must be specified")
+
+        if not isinstance(enable_crud, bool):
+            raise TypeError("enable_crud must be a boolean")
 
         def wrapper(cls):
             """Decorator function that wraps the target class"""
@@ -61,17 +85,40 @@ class MockCollectionInjector(CollectionInjector):
                 except (KeyError, AttributeError) as e:
                     raise KeyError(f"Collection '{collection_name}' not accessible in database") from e
 
-            # Create a new class that inherits from the original class
-            class Wrapped(cls):
+            # Import CRUDMixin here to avoid circular import
+            from mongollect.core import CRUDMixin
+
+            # Create base classes tuple
+            base_classes = [cls]
+            if enable_crud:
+                base_classes.append(CRUDMixin)
+
+            # Create a new class that inherits from the original class and optionally CRUDMixin
+            class Wrapped(*base_classes):
                 def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
+                    # Initialize all parent classes
+                    for base in base_classes:
+                        if hasattr(base, '__init__'):
+                            try:
+                                base.__init__(self, *args, **kwargs)
+                            except TypeError:
+                                # Handle classes that don't accept arguments
+                                if base is not object:
+                                    base.__init__(self)
+
                     # Use the collections from the outer scope
                     for attr_name, collection in collection_objects.items():
                         setattr(self, attr_name, collection)
 
+                    # For CRUD operations with multiple collections, set the first one as default
+                    if enable_crud and collections:
+                        first_attr = next(iter(collections.keys()))
+                        self.collection = collection_objects[first_attr]
+
                 def __repr__(self):
                     collections_str = ', '.join(f"{k}='{v}'" for k, v in collections.items())
-                    return f"{cls.__name__}(collections={{{collections_str}}})"
+                    crud_info = " with CRUD" if enable_crud else ""
+                    return f"{cls.__name__}(collections={{{collections_str}}}{crud_info})"
 
             # Preserve original class metadata
             Wrapped.__name__ = cls.__name__
@@ -205,7 +252,7 @@ class TestCollectionInjector(unittest.TestCase):
         self.assertEqual(DecoratedClass.__name__, "TestClass")
 
         # Check the string representation
-        self.assertEqual(repr(instance), "TestClass(collection='test_collection')")
+        self.assertEqual(repr(instance), "TestClass(collection='test_collection' with CRUD)")
 
     def test_multiple_collections_decorator_with_no_collections(self):
         """Test that multiple_collections decorator with no collections raises ValueError"""
